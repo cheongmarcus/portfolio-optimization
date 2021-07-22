@@ -1,0 +1,1109 @@
+---
+title: "Portfolio Optimization"
+author: "Marcus Cheong Wei Ze"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+editor_options:
+  chunk_output_type: console
+---
+
+# **Universe**
+With the S&P 500 closing at a record high on last Friday (2 Jul 2021), this highlights that large cap companies are returning back to performing well in the market as the economy gradually recovers from COVID-19. The YTD performance of leading stock market indices such as the S&P 500 and NASDAQ 100 are up by ~3.45% and ~5.55% respectively - [Reference](https://www.financialexpress.com/investing-abroad/featured-stories/best-performing-stocks-5-large-cap-companies-with-up-to-33-return-till-date-in-2021/2190895/). 
+
+    
+Moreover, with large cap stocks often seen to provide higher quality and stability, they are said to be less volatile during rough markets. As such, it is worthwhile to look into creating a universe that consists of large cap stocks and relevant ETFs that invest in large cap companies. To ensure greater exposure and diversification, this universe will consider different sectors (Healthcare, Consumer Discretionary, Consumer Staples, Technology, Finance and Energy). Within each sector, the nature of business of the company is also considered. 
+    
+Amid the COVID-19 pandemic, China emerged stronger than others. While the U.S. GDP fell by 2.3%, China’s grew by 2.3% in 2020 - [Reference](https://www.cnbc.com/2021/02/01/new-chart-shows-china-gdp-could-overtake-us-sooner-as-covid-took-its-toll.html). The divergence between both countries in terms of GDP is reducing. It is thus projected that China will overtake the U.S. as the world’s largest economy in the near future. Hence, I will also seek to include large cap stocks from the China Market. Over the past 5 years, [technology and consumer discretionary industries](https://eresearch.fidelity.com/eresearch/markets_sectors/sectors/si_performance.jhtml?tab=siperformance) have been the best performing sectors. Hence, the composition of the universe will consist of more stocks coming from these sectors. 
+
+I have decided to pick 15 assets, of which 10 are equity stocks and 5 are ETFs.
+
+<u> Components in the **Universe:**</u>
+
+Sector                 | Number of Stocks/ETFs       | Stocks/ETFs Tickers                |            
+-----------------------|-----------------------------|------------------------------------|
+Healthcare             | 1 ETF                       | XLV                                |
+Consumer Discretionary | 4 Equity Stocks             | TSLA, NKE, HD, BABA                |
+Consumer Staples       | 2 Equity Stocks             | PG, COST                           |
+Technology             | 4 Equity Stocks and 2 ETFs  | MSFT, AAPL, NFLX, ORCL, ARKW, KWEB |
+Finance                | 1 ETF                       | XLF                                |
+Energy                 | 1 ETF                       | XLE                                |
+
+
+Here are some of the packages to use:
+
+### **Loading of packages**
+```{r, warning=FALSE, message=FALSE}
+library(tidyquant)
+library(plotly)
+library(quantmod)
+library(timetk)
+library(tidyverse)
+library(dplyr)
+library(fPortfolio)
+library(PerformanceAnalytics)
+library(ggplot2)
+library(xts)
+library(zoo)
+library(PortfolioAnalytics)
+library(viridis)
+library(reshape)
+library(hrbrthemes)
+```
+
+
+Import price data and obtain closing price and calculate returns
+
+### **Adjusted Price and Return**
+```{r, warning=FALSE, message=FALSE}
+# Get the price data
+tickers <- c("XLV","TSLA","NKE","HD","BABA","PG","COST", "MSFT", "AAPL", "NFLX", "ORCL", "ARKW", "KWEB", "XLF", "XLE")
+getSymbols(tickers, from="2015-01-01", to="2021-06-30", periodicity = "daily")
+
+#Make adjusted price data frame
+get.AdPrices <- function(x) {Ad(get(x))}
+AdClosePrices <- do.call(merge, lapply(tickers, get.AdPrices)) # all the ETF adjusted prices in one dataframe
+head(AdClosePrices)
+
+#Make return data frame
+get.AdReturns <- function(x) {dailyReturn(Ad(get(x)))} #obtain the daily returns
+AdCloseReturns <- do.call(merge, lapply(tickers, get.AdReturns))
+colnames(AdCloseReturns) <- tickers
+head(AdCloseReturns)
+```
+
+```{r, warning=FALSE, message=FALSE}
+hist.return <- AdCloseReturns[rowSums(is.na(AdCloseReturns))==0, ]
+hist.return.ts <- as.timeSeries(hist.return)
+```
+
+# **Feature Engineering**
+
+In this section, I will be looking into some features to determine if they are good predictors for the returns of each of the stocks in my universe.
+
+  * Cboe Volatility Index (VIX) (Source: Yahoo Finance)
+  * Oil Prices - Brent Crude Oil Last Day Financ (Source: Yahoo Finance)
+  * Trade weighted U.S. Dollar Index - DXY (Source: Yahoo Finance)
+  * Gold Price (Source: Yahoo Finance)
+  * Returns of Indexes such as SP500, DJIA, SP400 Mid Cap, NASDAQ100, IXCO, SOX (Source: Yahoo Finance)
+  * Fed Fund Rates ([Source: St. Louis Fed’s FRED database](https://fred.stlouisfed.org/series/DFF))
+  * Unemployment Claims ([Source: St. Louis Fed’s FRED database](https://fred.stlouisfed.org/series/ICSA)) - downloaded data (monthly)
+  * Term Spread (10-Year Treasury Constant Maturity Minus 3-Month Treasury Constant Maturity) ([Source: St. Louis Fed’s FRED database](https://fred.stlouisfed.org/series/T10Y3M)) - downloaded data (daily)
+  * Industrial Production Index ([Source: St. Louis Fed’s FRED database](https://fred.stlouisfed.org/series/INDPRO)) - downloaded data (monthly)
+  * OFR Financial Stress Index ([Source:](https://www.financialresearch.gov/financial-stress-index/)) - download data (daily)
+  * AAII Sentiment ([Source: American Association of Individual Investors](https://www.aaii.com/sentimentsurvey/sent_results)) - downloaded data
+  * Inflation Rate (looking at the change in CPI)
+  * Bollinger Band Width
+  * Relative Strength Index (RSI)
+  * Moving Average Convergence Divergence (MACD)
+
+### **Obtain relevant data**
+
+
+* <u>Directly from Yahoo Finance</u>
+
+```{r, warning=FALSE, message=FALSE}
+# Get the price data of VIX, US Dollar Index from yahoo finance
+get_yahoo <- function(tk) {
+  
+  df <- getSymbols(tk, src = 'yahoo', auto.assign = FALSE, from = '2015-01-01', to='2021-06-30')
+  
+  df <- df %>%
+    as_tibble() %>%
+    mutate(date = index(df))
+  
+  colnames(df) <- c("open", "high", "low", "close", "volume", "adjusted_close", "date", "ticker")
+  
+  return(df)
+  
+}
+
+VIX <- get_yahoo('^VIX') %>%
+  select(date, adjclose = adjusted_close)
+
+Oil <- get_yahoo('BZ=F') %>%
+  select(date, adjclose = adjusted_close)
+
+US.dollar <- get_yahoo('DX-Y.NYB') %>%
+  select(date, adjclose = adjusted_close)
+
+gold <- get_yahoo('GC=F') %>%
+  select(date, adjclose = adjusted_close)
+
+sp500 <- get_yahoo('^GSPC') %>%
+  select(date, adjclose = adjusted_close)
+
+djia <- get_yahoo('^DJI') %>%
+  select(date, adjclose = adjusted_close)
+
+sp400 <- get_yahoo('^MID') %>%
+  select(date, adjclose = adjusted_close)
+
+nasdaq <- get_yahoo('^NDX') %>%
+  select(date, adjclose = adjusted_close)
+
+ixco <- get_yahoo('^IXCO') %>%
+  select(date, adjclose = adjusted_close)
+
+phlx_semiconductor <- get_yahoo('^SOX') %>%
+  select(date, adjclose = adjusted_close)
+
+indicators <- list(VIX, Oil, US.dollar,gold,sp500,djia,sp400,nasdaq,ixco,phlx_semiconductor) %>% reduce(left_join, by = "date")
+colnames(indicators) <- c("date","vix","oil","us_dollar_index","gold", "sp500",
+                          "djia","sp400","nasdaq","ixco","sox")
+```
+
+```{r, warning=FALSE, message=FALSE}
+#check if there is any NA values
+sum(is.na(indicators$us_dollar_index))
+sum(is.na(indicators$oil))
+sum(is.na(indicators$gold))
+
+# there is NA values, fill it with the previous day price
+indicators <-indicators %>% fill(us_dollar_index, .direction = "down")
+indicators <-indicators %>% fill(oil, .direction = "down")
+indicators <-indicators %>% fill(gold, .direction = "down")
+
+#Calculate returns
+indicators <- indicators %>% tq_mutate(select = vix,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'vix_return')
+
+indicators <- indicators %>% tq_mutate(select = oil,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'oil_return')
+
+indicators <- indicators %>% tq_mutate(select = us_dollar_index,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'us_dollar_index_return')
+
+indicators <- indicators %>% tq_mutate(select = gold,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'gold_return')
+
+indicators <- indicators %>% tq_mutate(select = sp500,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'sp500_return')
+
+indicators <- indicators %>% tq_mutate(select = djia,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'djia_return')
+
+indicators <- indicators %>% tq_mutate(select = sp400,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'sp400_return')
+
+indicators <- indicators %>% tq_mutate(select = nasdaq,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'nasdaq_return')
+
+indicators <- indicators %>% tq_mutate(select = ixco,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'ixco_return')
+
+indicators <- indicators %>% tq_mutate(select = sox,
+            mutate_fun = periodReturn,
+            period = 'daily',
+            type = 'arithmetic',                            
+            col_rename = 'sox_return')
+
+```
+
+* <u>From downloaded csv files</u>
+
+```{r, warning=FALSE, message=FALSE}
+filenames <- list.files(path="C:/Users/marcu/Desktop/NUS BBA4/Y4S2/SKKU ISS/ISS3244/project_data",
+    pattern=".*csv")
+
+names <- str_extract(filenames, "^[^\\.:]+")
+
+for(i in names){
+  assign(i, read.csv(paste("C:/Users/marcu/Desktop/NUS BBA4/Y4S2/SKKU ISS/ISS3244/project_data/", i, ".csv", sep="")))
+}
+
+head(DFF)
+head(fsi)
+head(ICSA)
+head(INDPRO)
+head(sentiment)
+head(T10Y3M)
+head(cpi)
+
+DFF$DATE <- as.Date(DFF$DATE)
+colnames(DFF) <- c("date","fed_funds_rate")
+
+fsi$Date <- as.Date(fsi$Date, format="%d/%m/%Y")
+fsi_df <- fsi[,1:2]
+colnames(fsi_df) <- c("date","osr_fsi")
+
+T10Y3M$DATE <- as.Date(T10Y3M$DATE, format="%Y-%m-%d")
+colnames(T10Y3M) <- c("date","term_spread")
+
+cpi$DATE <- as.Date(cpi$DATE, format="%Y-%m-%d")
+colnames(cpi) <- c("date","change_in_cpi")
+
+# join those with daily data to the previous 'indicators' dataframe
+indicators <- indicators %>% left_join(DFF, by="date") %>% left_join(fsi_df, by="date") %>% 
+  left_join(T10Y3M, by="date")
+
+head(indicators) 
+```
+
+* <u>Individual Stock Technical Indicators - Bollinger Bands Width, RSI, MACD, PE Ratio</u>
+
+```{r, warning=FALSE, message=FALSE}
+# -------------------------------------------------------------- Bollinger Bands ----------------------------------------------------------
+
+getSymbols(tickers, from="2014-12-01", to="2021-06-30", periodicity = "daily")
+date_band <- "2015-01-01"
+
+# Repeat this code for all the tickers
+xlv_bbands <- BBands(XLV[,c("XLV.High","XLV.Low","XLV.Close")])
+xlv_bbands <- xlv_bbands[index(xlv_bbands) >= date_band,1:3]
+XLV <- XLV[index(XLV) >= date_band,]
+XLV <- cbind(XLV, xlv_bbands)
+bb_df_xlv <- as.data.frame(XLV) %>% mutate(xlv_bb_width = (up-dn)/mavg) %>% select(xlv_bb_width)
+
+# ----repeat----
+tsla_bbands <- BBands(TSLA[,c("TSLA.High","TSLA.Low","TSLA.Close")])
+tsla_bbands <- tsla_bbands[index(tsla_bbands) >= date_band,1:3]
+TSLA <- TSLA[index(TSLA) >= date_band,]
+TSLA <- cbind(TSLA, tsla_bbands)
+bb_df_tsla <- as.data.frame(TSLA) %>% mutate(tsla_bb_width = (up-dn)/mavg) %>% select(tsla_bb_width)
+
+nke_bbands <- BBands(NKE[,c("NKE.High","NKE.Low","NKE.Close")])
+nke_bbands <- nke_bbands[index(nke_bbands) >= date_band,1:3]
+NKE <- NKE[index(NKE) >= date_band,]
+NKE <- cbind(NKE, nke_bbands)
+bb_df_nke <- as.data.frame(NKE) %>% mutate(nke_bb_width = (up-dn)/mavg) %>% select(nke_bb_width)
+
+hd_bbands <- BBands(HD[,c("HD.High","HD.Low","HD.Close")])
+hd_bbands <- hd_bbands[index(hd_bbands) >= date_band,1:3]
+HD <- HD[index(HD) >= date_band,]
+HD <- cbind(HD, hd_bbands)
+bb_df_hd <- as.data.frame(HD) %>% mutate(hd_bb_width = (up-dn)/mavg) %>% select(hd_bb_width)
+
+baba_bbands <- BBands(BABA[,c("BABA.High","BABA.Low","BABA.Close")])
+baba_bbands <- baba_bbands[index(baba_bbands) >= date_band,1:3]
+BABA <- BABA[index(BABA) >= date_band,]
+BABA <- cbind(BABA, baba_bbands)
+bb_df_baba <- as.data.frame(BABA) %>% mutate(baba_bb_width = (up-dn)/mavg) %>% select(baba_bb_width)
+
+pg_bbands <- BBands(PG[,c("PG.High","PG.Low","PG.Close")])
+pg_bbands <- pg_bbands[index(pg_bbands) >= date_band,1:3]
+PG <- PG[index(PG) >= date_band,]
+PG <- cbind(PG, pg_bbands)
+bb_df_pg <- as.data.frame(PG) %>% mutate(pg_bb_width = (up-dn)/mavg) %>% select(pg_bb_width)
+
+cost_bbands <- BBands(COST[,c("COST.High","COST.Low","COST.Close")])
+cost_bbands <- cost_bbands[index(cost_bbands) >= date_band,1:3]
+COST <- COST[index(COST) >= date_band,]
+COST <- cbind(COST, cost_bbands)
+bb_df_cost <- as.data.frame(COST) %>% mutate(cost_bb_width = (up-dn)/mavg) %>% select(cost_bb_width)
+
+msft_bbands <- BBands(MSFT[,c("MSFT.High","MSFT.Low","MSFT.Close")])
+msft_bbands <- msft_bbands[index(msft_bbands) >= date_band,1:3]
+MSFT <- MSFT[index(MSFT) >= date_band,]
+MSFT <- cbind(MSFT, msft_bbands)
+bb_df_msft <- as.data.frame(MSFT) %>% mutate(msft_bb_width = (up-dn)/mavg) %>% select(msft_bb_width)
+
+aapl_bbands <- BBands(AAPL[,c("AAPL.High","AAPL.Low","AAPL.Close")])
+date_band <- "2015-01-01"
+aapl_bbands <- aapl_bbands[index(aapl_bbands) >= date_band,1:3]
+AAPL <- AAPL[index(AAPL) >= date_band,]
+AAPL <- cbind(AAPL, aapl_bbands)
+bb_df_aapl <- as.data.frame(AAPL) %>% mutate(aapl_bb_width = (up-dn)/mavg) %>% select(aapl_bb_width)
+
+nflx_bbands <- BBands(NFLX[,c("NFLX.High","NFLX.Low","NFLX.Close")])
+nflx_bbands <- nflx_bbands[index(nflx_bbands) >= date_band,1:3]
+NFLX <- NFLX[index(NFLX) >= date_band,]
+NFLX <- cbind(NFLX, nflx_bbands)
+bb_df_nflx <- as.data.frame(NFLX) %>% mutate(nflx_bb_width = (up-dn)/mavg) %>% select(nflx_bb_width)
+
+orcl_bbands <- BBands(ORCL[,c("ORCL.High","ORCL.Low","ORCL.Close")])
+orcl_bbands <- orcl_bbands[index(orcl_bbands) >= date_band,1:3]
+ORCL <- ORCL[index(ORCL) >= date_band,]
+ORCL <- cbind(ORCL, orcl_bbands)
+bb_df_orcl <- as.data.frame(ORCL) %>% mutate(orcl_bb_width = (up-dn)/mavg) %>% select(orcl_bb_width)
+
+arkw_bbands <- BBands(ARKW[,c("ARKW.High","ARKW.Low","ARKW.Close")])
+arkw_bbands <- arkw_bbands[index(arkw_bbands) >= date_band,1:3]
+ARKW <- ARKW[index(ARKW) >= date_band,]
+ARKW <- cbind(ARKW, arkw_bbands)
+bb_df_arkw <- as.data.frame(ARKW) %>% mutate(arkw_bb_width = (up-dn)/mavg) %>% select(arkw_bb_width)
+
+kweb_bbands <- BBands(KWEB[,c("KWEB.High","KWEB.Low","KWEB.Close")])
+kweb_bbands <- kweb_bbands[index(kweb_bbands) >= date_band,1:3]
+KWEB <- KWEB[index(KWEB) >= date_band,]
+KWEB <- cbind(KWEB, kweb_bbands)
+bb_df_kweb <- as.data.frame(KWEB) %>% mutate(kweb_bb_width = (up-dn)/mavg) %>% select(kweb_bb_width)
+
+xlf_bbands <- BBands(XLF[,c("XLF.High","XLF.Low","XLF.Close")])
+xlf_bbands <- xlf_bbands[index(xlf_bbands) >= date_band,1:3]
+XLF <- XLF[index(XLF) >= date_band,]
+XLF <- cbind(XLF, xlf_bbands)
+bb_df_xlf <- as.data.frame(XLF) %>% mutate(xlf_bb_width = (up-dn)/mavg) %>% select(xlf_bb_width)
+
+xle_bbands <- BBands(XLE[,c("XLE.High","XLE.Low","XLE.Close")])
+xle_bbands <- xle_bbands[index(xle_bbands) >= date_band,1:3]
+XLE <- XLE[index(XLE) >= date_band,]
+XLE <- cbind(XLE, xle_bbands)
+bb_df_xle <- as.data.frame(XLE) %>% mutate(xle_bb_width = (up-dn)/mavg) %>% select(xle_bb_width)
+
+bb_width_full <- cbind(bb_df_xlv,bb_df_tsla,bb_df_nke,bb_df_hd,bb_df_baba,bb_df_pg,bb_df_cost,bb_df_msft,bb_df_aapl,bb_df_nflx,bb_df_orcl,
+                       bb_df_arkw,bb_df_kweb,bb_df_xlf,bb_df_xle)
+
+head(bb_width_full)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#  ------------------------------------------------- Relative Strength Index (RSI) ------------------------------------------------- 
+
+# calculations
+getSymbols(tickers, from="2014-12-11", to="2021-06-30", periodicity = "daily")
+rsi_df_xlv <- RSI(XLV$XLV.Adjusted,14)
+rsi_df_tsla <- RSI(TSLA$TSLA.Adjusted,14)
+rsi_df_nke <- RSI(NKE$NKE.Adjusted,14)
+rsi_df_hd <- RSI(HD$HD.Adjusted,14)
+rsi_df_baba <- RSI(BABA$BABA.Adjusted,14)
+rsi_df_pg <- RSI(PG$PG.Adjusted,14)
+rsi_df_cost <- RSI(COST$COST.Adjusted,14)
+rsi_df_msft <- RSI(MSFT$MSFT.Adjusted,14)
+rsi_df_aapl <- RSI(AAPL$AAPL.Adjusted,14)
+rsi_df_nflx <- RSI(NFLX$NFLX.Adjusted,14)
+rsi_df_orcl <- RSI(ORCL$ORCL.Adjusted,14)
+rsi_df_arkw <- RSI(ARKW$ARKW.Adjusted,14)
+rsi_df_kweb <- RSI(KWEB$KWEB.Adjusted,14)
+rsi_df_xlf <- RSI(XLF$XLF.Adjusted,14)
+rsi_df_xle <- RSI(XLE$XLE.Adjusted,14)
+
+# Subset data
+rsi_df_xlv <- rsi_df_xlv[index(rsi_df_xlv) >= date_band,]
+rsi_df_tsla <- rsi_df_tsla[index(rsi_df_tsla) >= date_band,]
+rsi_df_nke <- rsi_df_nke[index(rsi_df_nke) >= date_band,]
+rsi_df_hd <- rsi_df_hd[index(rsi_df_hd) >= date_band,]
+rsi_df_baba <- rsi_df_baba[index(rsi_df_baba) >= date_band,]
+rsi_df_pg <- rsi_df_pg[index(rsi_df_pg) >= date_band,]
+rsi_df_cost <- rsi_df_cost[index(rsi_df_cost) >= date_band,]
+rsi_df_msft <- rsi_df_msft[index(rsi_df_msft) >= date_band,]
+rsi_df_aapl <- rsi_df_aapl[index(rsi_df_aapl) >= date_band,]
+rsi_df_nflx <- rsi_df_nflx[index(rsi_df_nflx) >= date_band,]
+rsi_df_orcl <- rsi_df_orcl[index(rsi_df_orcl) >= date_band,]
+rsi_df_arkw <- rsi_df_arkw[index(rsi_df_arkw) >= date_band,]
+rsi_df_kweb <- rsi_df_kweb[index(rsi_df_kweb) >= date_band,]
+rsi_df_xlf <- rsi_df_xlf[index(rsi_df_xlf) >= date_band,]
+rsi_df_xle <- rsi_df_xle[index(rsi_df_xle) >= date_band,]
+
+
+# Colnames
+colnames(rsi_df_xlv) <- "rsi_xlv"
+colnames(rsi_df_tsla) <- "rsi_tsla"
+colnames(rsi_df_nke) <- "rsi_nke"
+colnames(rsi_df_hd) <- "rsi_hd"
+colnames(rsi_df_baba) <- "rsi_baba"
+colnames(rsi_df_pg) <- "rsi_pg"
+colnames(rsi_df_cost) <- "rsi_cost"
+colnames(rsi_df_msft) <- "rsi_msft"
+colnames(rsi_df_aapl) <- "rsi_aapl"
+colnames(rsi_df_nflx) <- "rsi_nflx"
+colnames(rsi_df_orcl) <- "rsi_orcl"
+colnames(rsi_df_arkw) <- "rsi_arkw"
+colnames(rsi_df_kweb) <- "rsi_kweb"
+colnames(rsi_df_xlf) <- "rsi_clf"
+colnames(rsi_df_xle) <- "rsi_xle"
+
+# Join all
+rsi_full <- cbind(rsi_df_xlv,rsi_df_tsla,rsi_df_nke,rsi_df_hd,rsi_df_baba,rsi_df_pg,rsi_df_cost,rsi_df_msft,rsi_df_aapl,rsi_df_nflx,
+                       rsi_df_orcl,rsi_df_arkw,rsi_df_kweb,rsi_df_xlf,rsi_df_xle)
+
+head(rsi_full)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+#  ------------------------------------------------- Moving Average Convergence Divergence (MACD) ----------------------------------------
+
+getSymbols(tickers, from="2014-11-13", to="2021-06-30", periodicity = "daily")
+
+# Calculation
+myMACD <- function (x,price,S,L,K){
+  MACD <- EMA(price,S) - EMA(price,L)
+  signal <- EMA(MACD,K)
+  date <- x[,1]
+  price <- price
+  output <- cbind(date,price, MACD,signal)
+  colnames(output) <- c("date","closing_price", "MACD","signal")
+  return(output)
+}
+
+XLV <- myMACD(XLV,XLV$XLV.Adjusted, 12, 26,9)
+TSLA <- myMACD(TSLA,TSLA$TSLA.Adjusted, 12, 26,9)
+NKE <- myMACD(NKE,NKE$NKE.Adjusted, 12, 26,9)
+HD <- myMACD(HD,HD$HD.Adjusted, 12, 26,9)
+BABA <- myMACD(BABA,BABA$BABA.Adjusted, 12, 26,9)
+PG <- myMACD(PG,PG$PG.Adjusted, 12, 26,9)
+COST <- myMACD(COST,COST$COST.Adjusted, 12, 26,9)
+MSFT <- myMACD(MSFT,MSFT$MSFT.Adjusted, 12, 26,9)
+AAPL <- myMACD(AAPL,AAPL$AAPL.Adjusted, 12, 26,9)
+NFLX <- myMACD(NFLX,NFLX$NFLX.Adjusted, 12, 26,9)
+ORCL <- myMACD(ORCL,ORCL$ORCL.Adjusted, 12, 26,9)
+ARKW <- myMACD(ARKW,ARKW$ARKW.Adjusted, 12, 26,9)
+KWEB <- myMACD(KWEB,KWEB$KWEB.Adjusted, 12, 26,9)
+XLF <- myMACD(XLF,XLF$XLF.Adjusted, 12, 26,9)
+XLE <- myMACD(XLE,XLE$XLE.Adjusted, 12, 26,9)
+
+# Subset data
+XLV <- XLV[index(XLV) >= date_band,]
+TSLA <- TSLA[index(TSLA) >= date_band,]
+NKE <- NKE[index(NKE) >= date_band,]
+HD <- HD[index(HD) >= date_band,]
+BABA <- BABA[index(BABA) >= date_band,]
+PG <- PG[index(PG) >= date_band,]
+COST <- COST[index(COST) >= date_band,]
+MSFT <- MSFT[index(MSFT) >= date_band,]
+AAPL <- AAPL[index(AAPL) >= date_band,]
+NFLX <- NFLX[index(NFLX) >= date_band,]
+ORCL <- ORCL[index(ORCL) >= date_band,]
+ARKW <- ARKW[index(ARKW) >= date_band,]
+KWEB <- KWEB[index(KWEB) >= date_band,]
+XLF <- XLF[index(XLF) >= date_band,]
+XLE <- XLE[index(XLE) >= date_band,]
+
+# Compute MACD - Signal Line
+xlv_macd_signal_dist <- XLV$MACD-XLV$signal
+tsla_macd_signal_dist <- TSLA$MACD-TSLA$signal
+nke_macd_signal_dist <- NKE$MACD-NKE$signal
+hd_macd_signal_dist <- HD$MACD-HD$signal
+baba_macd_signal_dist <- BABA$MACD-BABA$signal
+pg_macd_signal_dist <- PG$MACD-PG$signal
+cost_macd_signal_dist <- COST$MACD-COST$signal
+msft_macd_signal_dist <- MSFT$MACD-MSFT$signal
+aapl_macd_signal_dist <- AAPL$MACD-AAPL$signal
+nflx_macd_signal_dist <- NFLX$MACD-NFLX$signal
+orcl_macd_signal_dist <- ORCL$MACD-ORCL$signal
+arkw_macd_signal_dist <- ARKW$MACD-ARKW$signal
+kweb_macd_signal_dist <- KWEB$MACD-KWEB$signal
+xlf_macd_signal_dist <- XLF$MACD-XLF$signal
+xle_macd_signal_dist <- XLE$MACD-XLE$signal
+
+# rename columns
+colnames(xlv_macd_signal_dist) <- "macd_xlv"
+colnames(tsla_macd_signal_dist) <- "macd_tsla"
+colnames(nke_macd_signal_dist) <- "macd_nke"
+colnames(hd_macd_signal_dist) <- "macd_hd"
+colnames(baba_macd_signal_dist) <- "macd_baba"
+colnames(pg_macd_signal_dist) <- "macd_pg"
+colnames(cost_macd_signal_dist) <- "macd_cost"
+colnames(msft_macd_signal_dist) <- "macd_msft"
+colnames(aapl_macd_signal_dist) <- "macd_aapl"
+colnames(nflx_macd_signal_dist) <- "macd_nflx"
+colnames(orcl_macd_signal_dist) <- "macd_orcl"
+colnames(arkw_macd_signal_dist) <- "macd_arkw"
+colnames(kweb_macd_signal_dist) <- "macd_kweb"
+colnames(xlf_macd_signal_dist) <- "macd_clf"
+colnames(xle_macd_signal_dist) <- "macd_xle"
+
+# Join all
+macd_full <- cbind(xlv_macd_signal_dist,tsla_macd_signal_dist,nke_macd_signal_dist,hd_macd_signal_dist,baba_macd_signal_dist,
+                   pg_macd_signal_dist,cost_macd_signal_dist,msft_macd_signal_dist,aapl_macd_signal_dist,nflx_macd_signal_dist,
+                   orcl_macd_signal_dist,arkw_macd_signal_dist,kweb_macd_signal_dist,xlf_macd_signal_dist,xle_macd_signal_dist)
+
+head(macd_full)
+
+```
+
+### **Correlation (Information Coefficient)**
+
+  * In this sub section, I are going to find the correlation between the features that I initially believe might be able to use to predict the stock returns. I have divided the features into the time period of the data available. 
+  * Some of the features have daily data, while some is weekly and some is monthly. At the end, I will have all the relevant correlation coefficient of all the features with the returns of the stocks in my universe.
+  * I will use the <code>quantmod</code> package to do the respective returns calculation for different time period.
+      + Daily Data: Already did in the Section 1.0.2
+      + Weekly Data: <code>weeklyReturn</code>
+      + Monthly Data: <code>monthlyReturn</code>
+
+<u>**Features with daily data**</u>
+
+```{r, warning=FALSE, message=FALSE}
+# Check correlation of features with individual stock - if there is relationship, then include in the model.
+# if it can predict the stock return
+
+relationship <- cor(AdCloseReturns[-1], indicators$vix_return[-dim(indicators)[1]]) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$oil_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$us_dollar_index_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$gold_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$sp500_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$djia_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$sp400_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$nasdaq_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$ixco_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$sox_return[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$fed_funds_rate[-dim(indicators)[1]])) %>% 
+  cbind(cor(AdCloseReturns[-1], indicators$osr_fsi[-dim(indicators)[1]])) %>%
+  cbind(cor(AdCloseReturns[-1], indicators$term_spread[-dim(indicators)[1]], use = "complete.obs"))
+
+colnames(relationship) <- c("VIX", "Oil", "US Dollar Index", "Gold", "SP500", 
+                            "DJIA", "SP400 Mid Cap", "NASDAQ", "IXCO", "SOX", "Fed Funds Rates", 
+                            "OSR FSI", "Term Spread")
+
+
+# BB Width, RSI, MACD
+options(scipen = 999)
+
+new_close <- AdCloseReturns[-1] # remove first row
+new_bb_width_full <- bb_width_full[-nrow(bb_width_full),] # remove last row
+bb_width_matrix <- as.matrix(diag(cor(new_close,new_bb_width_full)))
+
+new_rsi_full <- rsi_full[-nrow(rsi_full),] # remove last row
+rsi_matrix<- as.matrix(diag(cor(new_close,new_rsi_full)))
+
+new_macd_full <- macd_full[-nrow(macd_full),] # remove last row
+macd_matrix <- as.matrix(diag(cor(new_close,new_macd_full)))
+
+
+df_2 <- cbind(bb_width_matrix,rsi_matrix,macd_matrix)
+rownames(df_2) <- tickers
+colnames(df_2) <- c("Bollinger Band Width", "RSI", "MACD")
+
+relationship <- cbind(relationship,df_2)
+
+```
+
+<u>**Feature with weekly data i.e. AAII Sentiment**</u>
+
+```{r, warning=FALSE, message=FALSE}
+# Get the price data
+tickers <- c("XLV","TSLA","NKE","HD","BABA","PG","COST", "MSFT", "AAPL", "NFLX", "ORCL", "ARKW", "KWEB", "XLF", "XLE")
+getSymbols(tickers, from="2015-01-01", to="2021-06-30", periodicity = "weekly")
+
+#Make return data frame
+weekly_get.AdReturns <- function(x) {weeklyReturn(Ad(get(x)))} #obtain the weekly returns
+weekly_AdCloseReturns <- do.call(merge, lapply(tickers, weekly_get.AdReturns))
+colnames(weekly_AdCloseReturns) <- tickers
+head(weekly_AdCloseReturns)
+
+# sentiment data (extract the bullish sentiment column)
+bullish_sentiment <- sentiment[,1:2]
+bullish_sentiment$ï..Reported.Date <- as.Date(bullish_sentiment$ï..Reported.Date)
+bullish_sentiment <- bullish_sentiment[bullish_sentiment$ï..Reported.Date<="2021-06-24",] # to get the same dates with the assets returns dataframe
+bullish_sentiment$Bullish <- as.numeric(gsub("%", "", bullish_sentiment$Bullish))
+colnames(bullish_sentiment) <- c("date", "bullish_sentiment")
+
+# "2021-01-14" - missing in bullish sentiment data, so will remove this date from the adclosereturn in order to have same no. of rows for calculating dimension
+weekly_AdCloseReturns <- weekly_AdCloseReturns[-c(316),]
+
+corr <- cor(weekly_AdCloseReturns[-1], bullish_sentiment$bullish_sentiment[-dim(bullish_sentiment)[1]])
+colnames(corr) <- "Bullish Sentiment"
+
+# add the column to the relationship table
+relationship <- relationship %>% cbind(corr)
+```
+
+<u>**Feature with monthly data i.e. unemployment claims, industrial production index and change in CPI**</u>
+
+```{r, warning=FALSE, message=FALSE}
+# Get the price data
+tickers <- c("XLV","TSLA","NKE","HD","BABA","PG","COST", "MSFT", "AAPL", "NFLX", "ORCL", "ARKW", "KWEB", "XLF", "XLE")
+getSymbols(tickers, from="2015-01-01", to="2021-06-30", periodicity = "monthly")
+
+#Make return data frame
+monthly_get.AdReturns <- function(x) {monthlyReturn(Ad(get(x)))} #obtain the monthly returns
+monthly_get.AdReturns <- do.call(merge, lapply(tickers, monthly_get.AdReturns))
+colnames(monthly_get.AdReturns) <- tickers
+head(monthly_get.AdReturns)
+
+# INDPRO.csv - Industrial Production Index. INDPRO only has data up till May
+# ICSA.csv - Unemployment Claims, has data till Jul --> remove Jun, Jul
+# Montly Returns dataframe - has data till Jun --> remove Jun
+ICSA <- ICSA[-c(78,79),]
+monthly_get.AdReturns <- monthly_get.AdReturns[-c(78),]
+
+ICSA$ICSA <- as.numeric(ICSA$ICSA)
+INDPRO$INDPRO <- as.numeric(INDPRO$INDPRO)
+corr2 <- cor(monthly_get.AdReturns[-1], ICSA$ICSA[-dim(ICSA)[1]]) %>% 
+  cbind(cor(monthly_get.AdReturns[-1], INDPRO$INDPRO[-dim(INDPRO)[1]])) %>%
+  cbind(cor(monthly_get.AdReturns[-1], cpi$change_in_cpi[-dim(cpi)[1]])) 
+colnames(corr2) <- c("Unemployment Claims", "Industrial Production Index", "Change in CPI")
+
+
+relationship <- relationship %>% cbind(corr2)
+
+```
+
+**Correlation of features with the individual stocks/etfs**
+```{r}
+
+head(relationship)
+
+```
+
+
+# **Construction of Team Universe Portfolio**
+```{r, warning=FALSE, message=FALSE}
+# mean daily return of each stock/etf
+mean_ret <- colMeans(hist.return)
+
+# annualised covariance matrix
+cov_mat <- cov(hist.return) * 250
+
+# Run a 5000 random portfolio
+set.seed(123) #set.seed when running simulations to ensure all results, figures, etc are reproducible. They will continue to be the same.
+num_portfolio <- 5000
+
+# Create a matrix to store the weights of individual assets that make up the portfolio
+all_weights <- matrix(nrow = num_portfolio,
+                  ncol = length(tickers))
+
+# Creating an empty vector to store portfolio Returns
+portfolio_returns <- vector('numeric', length = num_portfolio)
+
+# Creating an empty vector to store portfolio S.D.
+portfolio_risk <- vector('numeric', length = num_portfolio)
+
+# Creating an empty vector to store portfolio Sharpe Ratio
+sharpe_ratio <- vector('numeric', length = num_portfolio)
+
+for (i in seq_along(portfolio_returns)) {
+  
+  # Weights of assets in the portfolio
+  weights <- runif(length(tickers))
+  weights <- weights/sum(weights) # to make sure that all add up to 1
+  all_weights[i,] <- weights
+  
+  # Portfolio Returns
+  port_ret <- sum(weights * mean_ret)
+  port_ret <- ((port_ret + 1)^250) - 1 #annual returns
+  portfolio_returns[i] <- port_ret
+  
+  # Portfolio risk
+  port_sd <- sqrt(t(weights) %*% (cov_mat  %*% weights)) #Expected portfolio s.d.= SQRT(t(W) * ((Covariance Matrix) * W))
+  portfolio_risk[i] <- port_sd
+  
+  # Sharpe Ratios (Assuming 0% Rf rate)
+  sr <- port_ret/port_sd
+  sharpe_ratio[i] <- sr
+  
+}
+
+# Store all the above calculated values into a table
+portfolio_weights <- tibble(Return = portfolio_returns,
+                  Risk = portfolio_risk,
+                  Sharpe_Ratio = sharpe_ratio)
+
+all_weights <- tk_tbl(all_weights)
+colnames(all_weights) <- colnames(hist.return.ts) # rename the columns of the weights dataframe
+
+# Combine both the weights df and portfolio df into a single df
+portfolio_weights <- tk_tbl(cbind(all_weights, portfolio_weights))
+portfolio_weights 
+
+```
+
+### **Types of Portfolio**
+
+Using the dataframe, I can decide what type of portfolio I want to construct and hence its respective weights in the portfolio. The following are the portfolios that I will consider.
+    
+  + **Minimum Variance Portfolio** (Portfolio with minimal volatility among the most efficient portfolio)
+  + **Tangency Portfolio** (Portfolio of risky assets with the least ratio of volatility of return - highest sharpe ratio)
+  + **Equal Weights Portfolio** (All the assets are equally weighted in the portfolio)
+
+
+
+**1. Minimum Variance Portfolio**
+
+```{r, warning=FALSE, message=FALSE}
+# choosing the portfolio that gives the minimum risk
+minimum_var <- portfolio_weights[which.min(portfolio_weights$Risk),]
+minimum_var$Risk
+print(minimum_var$Return)
+```
+
+  Stocks/ETFs   |    Portfolio Weights     |           
+:-------------: |:------------------------:|
+     XLV        |         17.6%            |
+     TSLA       |        0.638%            |
+     NKE        |         1.80%            |
+     HD         |         6.19%            |
+     BABA       |         3.94%            |
+     PG         |         17.5%            |
+     COST       |         12.6%            |
+     MSFT       |         6.40%            |
+     AAPL       |         6.69%            |
+     NFLX       |         1.49%            |
+     ORCL       |         7.86%            |
+     ARKW       |         1.63%            |
+     KWEB       |         13.1%            |
+     XLF        |         1.05%            |
+     XLE        |         1.53%            |
+
+```{r, warning=FALSE, message=FALSE}
+p_weights <- t(minimum_var[,1:15])
+colnames(p_weights) <- "weights"
+p_weights <- as.data.frame(p_weights)
+p_weights <- cbind(ticker = rownames(p_weights), p_weights)
+rownames(p_weights) <- 1:nrow(p_weights)
+p_weights$weights <- as.numeric(p_weights$weights)
+
+fig <- plot_ly(p_weights, labels = ~ticker, values = ~weights, type = 'pie')
+fig <- fig %>% layout(title = 'Minimum Variance Portfolio Asset Weights')
+
+fig
+```
+
+```{r}
+
+#Portfolio Daily Return Rebalance every Quarters
+
+mv_weights <- as.vector(minimum_var[,1:15] %>% unlist())
+mv_portfolio_Return <- Return.portfolio(AdCloseReturns, weights = mv_weights, rebalance_on = "quarters")
+
+chart.Histogram(mv_portfolio_Return, main = "Portfolio Daily Returns Distributions", cex.axis = 1.2, cex.lab = 1.5, cex.main = 2,colorset = "#F77171", note.line = mean(Return.portfolio(mv_portfolio_Return)), note.label = 'Average', note.color = 'black', note.cex = 1.2)
+
+```
+
+**2. Tangency Portfolio**
+```{r, warning=FALSE, message=FALSE}
+# choosing the portfolio that gives the highest sharpe ratio
+maximum_sr <- portfolio_weights[which.max(portfolio_weights$Sharpe_Ratio),]
+print(maximum_sr$Sharpe_Ratio)
+print(maximum_sr$Return)
+```
+
+  Stocks/ETFs   |    Portfolio Weights     |           
+:-------------: |:------------------------:|
+     XLV        |         4.82%            |
+     TSLA       |         14.6%            |
+     NKE        |       0.0473%            |
+     HD         |         4.77%            |
+     BABA       |         4.47%            |
+     PG         |         1.53%            |
+     COST       |         14.4%            |
+     MSFT       |         9.21%            |
+     AAPL       |         5.13%            |
+     NFLX       |         15.4%            |
+     SE         |         4.30%            |
+     ARKW       |         13.9%            |
+     KWEB       |         4.06%            |
+     XLF        |        0.282%            |
+     XLE        |         3.06%            |
+
+
+```{r, warning=FALSE, message=FALSE}
+p_weights_2 <- t(maximum_sr[,1:15])
+colnames(p_weights_2) <- "weights"
+p_weights_2 <- as.data.frame(p_weights_2)
+p_weights_2 <- cbind(ticker = rownames(p_weights_2), p_weights_2)
+rownames(p_weights_2) <- 1:nrow(p_weights_2)
+p_weights_2$weights <- as.numeric(p_weights_2$weights)
+
+fig1 <- plot_ly(p_weights_2, labels = ~ticker, values = ~weights, type = 'pie')
+fig1 <- fig1 %>% layout(title = 'Tangency Portfolio Asset Weights')
+
+fig1
+```       
+
+```{r}
+
+#Portfolio Daily Return Rebalance every Quarters
+
+tp_weights <- as.vector(maximum_sr[,1:15] %>% unlist())
+tp_portfolio_Return <- Return.portfolio(AdCloseReturns, weights = tp_weights, rebalance_on = "quarters")
+
+chart.Histogram(tp_portfolio_Return, main = "Portfolio Daily Returns Distributions", cex.axis = 1.2, cex.lab = 1.5, cex.main = 2,colorset = "#F77171", note.line = mean(Return.portfolio(tp_portfolio_Return)), note.label = 'Average', note.color = 'black', note.cex = 1.2)
+
+
+```
+
+
+**3. Equal Weightage Portfolio**
+```{r}
+eq_weight <- rep(1/length(tickers), length(tickers))
+
+#equal weights portfolio returns
+eq_port_ret <- sum(eq_weight * mean_ret)
+eq_port_ret <- ((eq_port_ret + 1)^250) - 1 #annual returns
+
+#equal weights portfolio s.d.
+eq_port_sd <- as.vector(sqrt(t(weights) %*% (cov_mat  %*% weights)))
+
+#equal weights portfolio sharpe ratio
+eq_port_sr <- as.vector(port_ret/port_sd)
+
+eq_portfolio <- append(eq_weight,eq_port_ret) # add to the vector
+eq_portfolio <- append(eq_portfolio,eq_port_sd) # add to the vector
+eq_portfolio <- append(eq_portfolio,eq_port_sr) # add to the vector
+
+
+#Portfolio Daily Return Rebalance every Quarters
+eq_weight_portfolio_Return <- Return.portfolio(AdCloseReturns, weights = eq_weight, rebalance_on = "quarters")
+
+chart.Histogram(eq_weight_portfolio_Return, main = "Portfolio Daily Returns Distributions", cex.axis = 1.2, cex.lab = 1.5, cex.main = 2,colorset = "#F77171", note.line = mean(Return.portfolio(eq_weight_portfolio_Return)), note.label = 'Average', note.color = 'black', note.cex = 1.2)
+
+```
+
+Overall efficient frontier chart
+```{r, warning=FALSE, message=FALSE}
+p <- portfolio_weights %>%
+  ggplot(aes(x = Risk, y = Return, color = Sharpe_Ratio)) +
+  geom_point() +
+  theme_classic() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(x = 'Annualized Risk',
+       y = 'Annualized Returns',
+       title = "Portfolio Optimization & Efficient Frontier") +
+  geom_point(aes(x = Risk,
+                 y = Return), data = minimum_var, color = 'red') +
+  geom_point(aes(x = Risk,
+                 y = Return), data = maximum_sr, color = 'red') +
+  expand_limits(x= 0, y =0)
+
+ggplotly(p)
+```
+
+**Overview of the 3 types of portfolio**
+```{r, warning=FALSE, message=FALSE}
+`Type of Portfolio` <- c("Minimum Variance Portfolio", "Tangency Portfolio", "Equal Weightage Portfolio")
+portfolios <- rbind(minimum_var,maximum_sr,eq_portfolio)
+portfolios <- cbind(`Type of Portfolio`,portfolios)
+print(portfolios)
+```
+
+I will thus pick the **Tangency Portfolio** since it gives the highest return and sharpe ratio among the 3 efficient portfolios constructed.
+
+# **Portfolio**
+```{r, warning=FALSE, message=FALSE}
+# obtain the daily expected return of this portfolio
+port_returns <- as.matrix(AdCloseReturns) %*% as.matrix(p_weights_2[,2])
+port_returns <- as.data.frame(port_returns)
+colnames(port_returns) <- "daily.port.return"
+port_returns <- cbind(date = rownames(port_returns), port_returns)
+rownames(port_returns) <- 1:nrow(port_returns)
+port_returns$date <- as.Date(port_returns$date)
+
+
+#cumulative return - for constructed portfolio
+port_returns$cumulative.return <- rep(NaN, dim(port_returns)[1]) # fill column with NA values #dim(DIS)[1] means number of rows
+
+for (i in 2:dim(port_returns)[1]) {
+  port_returns$cumulative.return[i] <- prod(1+port_returns$daily.port.return[2:i])-1
+}
+
+#cumulative return - for individual stocks
+indiv_stock_cumulative_returns <- as.xts(apply(AdCloseReturns, 2, cumsum))
+
+# Merge
+new_dataframe <- cbind(indiv_stock_cumulative_returns,port_returns$cumulative.return)
+colnames(new_dataframe)[16] <- "portfolio"
+
+# Convert dataframe from wide to long format to plot chart
+new_df <- data.frame(date=index(new_dataframe), coredata(new_dataframe))
+new_df <- new_df %>% gather("ticker", "returns", -date) 
+
+# Draw cumulative return
+new_df %>%
+  ggplot(aes(x=date, y=returns*100, group=ticker, color=ticker)) +
+  geom_line() +
+  ggtitle("Performance - Daily Cumulative Returns of Portfolio vs. Individual Stocks/ETFs") +
+  theme_ipsum() +
+  ylab("Daily Cumulative Returns (%)") +
+  xlab("Date") + 
+  theme(plot.title = element_text(hjust = 0.5,size=10.5))
+
+
+```
+
+* Miscellaneous Plots
+```{r, eval=FALSE}
+plot1 <- ggplot(AAPL, aes(x = index(AAPL))) + geom_line(aes(y = AAPL.Adjusted, colour = "AAPL Adjusted Closing Price")) +
+  scale_colour_manual(values = c("darkred"))
+plot2 <- ggplot(rsi_df_aapl, aes(x = index(rsi_df_aapl))) +  geom_line(aes(y = rsi_aapl, colour = "RSI")) +
+  scale_colour_manual(values = c("steelblue"))
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(plot1), ggplotGrob(plot2), size = "last"))
+
+
+AAPL.v1 <- myMACD(AAPL,AAPL$AAPL.Adjusted, 12, 26,9)
+AAPL.v1 <- AAPL.v1[index(AAPL.v1) >= date_band,]
+AAPL.v1$dist <-AAPL.v1$MACD-AAPL.v1$signal 
+AAPL.v1$date <- as.character(index(AAPL.v1))
+AAPL.v1 <- as.data.frame(AAPL.v1)
+AAPL.v1$date <-as.Date(AAPL.v1$date)
+
+AAPL.v2 <- AAPL.v1
+AAPL.v2$direction <- NA
+AAPL.v2$direction <- ifelse(AAPL.v1$dist>0,"Increasing","Decreasing")
+AAPL.v2$date <-as.Date(AAPL.v2$date)
+AAPL.v2 <- AAPL.v2[,c(1,6)]
+AAPL.v3 <- AAPL.v1 %>% left_join(AAPL.v2, by="date")
+
+AAPL.v3$MACD <- as.numeric(AAPL.v3$MACD)
+AAPL.v3$signal <- as.numeric(AAPL.v3$signal)
+AAPL.v3$dist <- as.numeric(AAPL.v3$dist)
+
+macd_chart <- ggplot(AAPL.v3, aes(x = date))
+macd_chart <- macd_chart + geom_line(aes(y = MACD, colour = "Moving Average Covergence Divergence (12,6,9)"))
+macd_chart <- macd_chart + geom_line(aes(y = signal, colour = "Signal"), linetype="dashed")
+macd_chart <- macd_chart + geom_bar(aes(y = dist,fill = as.factor(direction)),stat = "identity") + scale_fill_manual(values = c("Increasing" = "#008000", "Decreasing" = "#FF0000"))
+macd_chart <- macd_chart + scale_colour_manual(values = c("darkred", "steelblue"))
+macd_chart <- macd_chart + scale_x_date(limits = as.Date(c('2018-01-01','2020-06-30')))
+macd_chart
+AAPL.v1$MACD <- as.numeric(as.character(AAPL.v1$MACD))
+
+```
+
+```{r}
+# Technical Factors
+factor.model <- lm(AdCloseReturns$XLV ~ rsi_full$rsi_xlv + macd_full$macd_xlv + bb_width_full$xlv_bb_width)
+summary(factor.model)
+
+names(factor.model)
+factor.model$coefficients
+factor.exposure <- factor.model$coefficients[2:4]
+
+# Sentiment Factor
+factor.model.2 <- lm(AdCloseReturns$XLV ~ rsi_full$rsi_xlv + macd_full$macd_xlv + bb_width_full$xlv_bb_width)
+
+```
+
+
+# Portfolios Cumulative Returns Chart 
+
+```{r}
+# Tangency Portfolio Cumulative Returns
+port_returns <- as.matrix(AdCloseReturns) %*% as.matrix(p_weights_2[,2])
+port_returns <- as.data.frame(port_returns)
+colnames(port_returns) <- "daily.port.return"
+port_returns <- cbind(date = rownames(port_returns), port_returns)
+rownames(port_returns) <- 1:nrow(port_returns)
+port_returns$date <- as.Date(port_returns$date)
+
+
+port_returns$cumulative.return <- rep(NaN, dim(port_returns)[1]) # fill column with NA values #dim(DIS)[1] means number of rows
+
+for (i in 2:dim(port_returns)[1]) {
+  port_returns$cumulative.return[i] <- prod(1+port_returns$daily.port.return[2:i])-1
+}
+
+
+# Min Variance Portfolio Cumulative Returns
+mvp_port_returns <- as.matrix(AdCloseReturns) %*% as.matrix(p_weights[,2])
+mvp_port_returns <- as.data.frame(mvp_port_returns)
+colnames(mvp_port_returns) <- "daily.port.return"
+mvp_port_returns <- cbind(date = rownames(mvp_port_returns), mvp_port_returns)
+rownames(mvp_port_returns) <- 1:nrow(mvp_port_returns)
+mvp_port_returns$date <- as.Date(mvp_port_returns$date)
+
+
+#cumulative return - for constructed portfolio
+mvp_port_returns$cumulative.return <- rep(NaN, dim(mvp_port_returns)[1]) # fill column with NA values #dim(DIS)[1] means number of rows
+
+for (i in 2:dim(mvp_port_returns)[1]) {
+  mvp_port_returns$cumulative.return[i] <- prod(1+mvp_port_returns$daily.port.return[2:i])-1
+}
+
+
+
+# Equal Weighted Portfolio Cumulative Returns
+
+a <- as.data.frame(eq_weight)
+b<- as.data.frame(tickers)
+c <- cbind(b,a)
+eq_port_returns <- as.matrix(AdCloseReturns) %*% as.matrix(c[,2])
+eq_port_returns <- as.data.frame(eq_port_returns)
+colnames(eq_port_returns) <- "daily.port.return"
+eq_port_returns <- cbind(date = rownames(eq_port_returns), eq_port_returns)
+rownames(eq_port_returns) <- 1:nrow(eq_port_returns)
+eq_port_returns$date <- as.Date(eq_port_returns$date)
+
+
+#cumulative return - for constructed portfolio
+eq_port_returns$cumulative.return <- rep(NaN, dim(eq_port_returns)[1]) # fill column with NA values #dim(DIS)[1] means number of rows
+
+for (i in 2:dim(eq_port_returns)[1]) {
+  eq_port_returns$cumulative.return[i] <- prod(1+eq_port_returns$daily.port.return[2:i])-1
+}
+
+
+
+#SP500 cumulative returns
+sp500_returns <- as.data.frame(indicators$sp500_return)
+colnames(sp500_returns) <- "sp500"
+sp500_returns$cumulative.return <- rep(NaN, dim(sp500_returns)[1]) # fill column with NA values #dim(DIS)[1] means number of rows
+
+for (i in 2:dim(sp500_returns)[1]) {
+  sp500_returns$cumulative.return[i] <- prod(1+sp500_returns$sp500[2:i])-1
+}
+
+
+# Merge
+X3_port_df <- cbind(mvp_port_returns[,c(1,3)], port_returns[,3], eq_port_returns[,3],sp500_returns[,2])
+  
+  
+colnames(X3_port_df) <- c("date", "Min Var Portfolio", "Tangency Portfolio", "Equal-weighted Portfolio", "SP500")
+
+# Convert dataframe from wide to long format to plot chart
+X3_port_df$date <- as.Date(X3_port_df$date)
+X3_port_df <- X3_port_df[-1,]
+X3_port_df_new <- X3_port_df %>% gather("portfolio", "cum_returns", -date) 
+
+# Draw cumulative return
+data_a <- X3_port_df_new[X3_port_df_new$portfolio != "SP500",]
+data_a %>%
+  ggplot(aes(x=date, y=cum_returns*100, group=portfolio, color=portfolio)) +
+  geom_line() +
+  ggtitle("Performance - Daily Cumulative Returns of 3 DIfferent Portfolios") +
+  theme_ipsum() +
+  ylab("Daily Cumulative Returns (%)") +
+  theme(plot.title = element_text(hjust = 0.5,size=14.5))
+
+```
+
+```{r}
+# annualized return (change from cumulative returns to annualised returns)
+(1+X3_port_df$`Min Var Portfolio`[dim(X3_port_df)[1]])^(1/7)-1  # 7 years of data
+(1+X3_port_df$`Tangency Portfolio`[dim(X3_port_df)[1]])^(1/7)-1
+(1+X3_port_df$`Equal-weighted Portfolio`[dim(X3_port_df)[1]])^(1/7)-1
+(1+X3_port_df$SP500[dim(X3_port_df)[1]])^(1/7)-1
+```
+
+* Miscellaneous Plots
+```{r}
+
+# Volatility Plot
+sp500_returns_new <- cbind(sp500,sp500_returns)
+sp500_returns_new <- sp500_returns_new[,c(1,3)]
+sp500_returns_df <- xts(sp500_returns_new[,-1], order.by=as.Date(sp500_returns_new[,1], "%m/%d/%Y"))
+
+par(mfrow = c(1, 2), mai = c(1, 1, 1, 1))
+chart.RollingPerformance(R=sp500_returns_df, width =12, FUN = "sd.annualized", main = "SP500 Rolling 12 months volatility")
+par(new=TRUE)
+chart.RollingPerformance(R=tp_portfolio_Return, width =12, FUN = "sd.annualized", main = "Tangency Portfolio Rolling 12 months volatility")
+
+
+```
